@@ -1,0 +1,34 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ./backend
+    environment:
+      IAOFFDEV_OLLAMA_BASE_URL: http://ollama:11434
+      IAOFFDEV_HOST: 0.0.0.0
+      IAOFFDEV_PORT: 8765
+      IAOFFDEV_WORKSPACE_ROOT: /workspace
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./workspace_data:/workspace
+    depends_on:
+      - ollama
+
+  web:
+    build:
+      context: ./frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - api
+
+volumes:
+  ollama_data:
