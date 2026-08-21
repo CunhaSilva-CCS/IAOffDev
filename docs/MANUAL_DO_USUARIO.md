@@ -6,6 +6,26 @@
 
 ---
 
+## Telas da interface
+
+### Tela inicial (modo coletivo)
+
+![Tela inicial do IAOffDev](screenshots/iaoffdev_home_screen.png)
+
+A interface tem três colunas:
+
+1. **Esquerda** — marca, status das IAs, modo de consulta, modelo, provedores e workspace  
+2. **Centro** — chat e atalhos rápidos  
+3. **Direita** — arquivos do projeto  
+
+### Mesma tela (vista completa)
+
+![Vista completa da interface](screenshots/iaoffdev_latest_state.png)
+
+Para abrir a interface no seu Mac, veja a [seção 3](#3-instalação-no-mac-como-programa).
+
+---
+
 ## Sumário
 
 1. [O que é o IAOffDev](#1-o-que-é-o-iaoffdev)
