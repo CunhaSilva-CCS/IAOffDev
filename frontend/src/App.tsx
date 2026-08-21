@@ -2,6 +2,7 @@ import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchStatus,
   fetchWorkspace,
+  modelLabel,
   streamChat,
   uid,
   type ChatMessage,
@@ -28,10 +29,10 @@ const SUGGESTIONS = [
     prompt: "Leia o arquivo demo-app/main.py e explique o que ele faz, linha a linha de forma breve.",
   },
   {
-    title: "Refatorar com testes",
-    detail: "Melhore o código e adicione cobertura.",
+    title: "Consultar todas as IAs",
+    detail: "Peça opinião coletiva das IAs offline.",
     prompt:
-      "Refatore demo-app/main.py para ficar mais idiomático e adicione testes unitários em demo-app/test_main.py.",
+      "Compare abordagens para organizar um projeto Python + FastAPI com testes. Quero a melhor prática consolidada.",
   },
 ];
 
@@ -39,6 +40,7 @@ export default function App() {
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [workspace, setWorkspace] = useState("");
   const [model, setModel] = useState("");
+  const [council, setCouncil] = useState(true);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
@@ -53,7 +55,8 @@ export default function App() {
         if (cancelled) return;
         setStatus(st);
         setWorkspace(ws.path);
-        setModel(st.models[0]?.name || st.default_model);
+        const preferred = st.models[0]?.id || st.models[0]?.name || st.default_model;
+        setModel(preferred);
       } catch (err) {
         if (!cancelled) {
           setError(
@@ -69,7 +72,7 @@ export default function App() {
       void fetchStatus()
         .then((st) => {
           setStatus(st);
-          setModel((current) => current || st.models[0]?.name || st.default_model);
+          setModel((current) => current || st.models[0]?.id || st.models[0]?.name || st.default_model);
         })
         .catch(() => undefined);
     }, 15000);
@@ -86,8 +89,8 @@ export default function App() {
 
   const online = Boolean(status?.online);
   const canSend = useMemo(
-    () => Boolean(input.trim()) && !streaming && online && Boolean(model),
-    [input, streaming, online, model]
+    () => Boolean(input.trim()) && !streaming && (online || council),
+    [input, streaming, online, council]
   );
 
   async function sendPrompt(text: string) {
@@ -97,12 +100,11 @@ export default function App() {
     setError(null);
     const userMsg: ChatMessage = { id: uid(), role: "user", content: prompt };
     const assistantId = uid();
-    const nextMessages = [
+    setMessages([
       ...messages,
       userMsg,
-      { id: assistantId, role: "assistant" as const, content: "", pending: true },
-    ];
-    setMessages(nextMessages);
+      { id: assistantId, role: "assistant", content: "", pending: true },
+    ]);
     setInput("");
     setStreaming(true);
 
@@ -115,7 +117,8 @@ export default function App() {
         messages: history,
         model,
         workspace,
-        use_tools: true,
+        use_tools: !council,
+        council,
       })) {
         if (event.type === "token") {
           setMessages((prev) =>
@@ -125,6 +128,28 @@ export default function App() {
                 : m
             )
           );
+        } else if (event.type === "council_start") {
+          setMessages((prev) => [
+            ...prev.filter((m) => m.id !== assistantId || m.content),
+            {
+              id: uid(),
+              role: "tool",
+              toolName: "council",
+              content: `${event.content || "Consultando IAs…"}\n${(event.models || []).join("\n")}`,
+            },
+            { id: assistantId, role: "assistant", content: "", pending: true },
+          ]);
+        } else if (event.type === "council_result") {
+          const preview = (event.content || "").slice(0, 900);
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: uid(),
+              role: "tool",
+              toolName: event.name || "ia",
+              content: `${event.ok === false ? "[falhou] " : ""}${event.provider || ""} · ${event.name}\n${preview}`,
+            },
+          ]);
         } else if (event.type === "tool_start") {
           setMessages((prev) => [
             ...prev.filter((m) => m.id !== assistantId || m.content),
@@ -154,7 +179,7 @@ export default function App() {
                 ? {
                     ...m,
                     pending: false,
-                    content: m.content || `⚠️ ${event.content}`,
+                    content: m.content || `Erro: ${event.content}`,
                   }
                 : m
             )
@@ -172,7 +197,6 @@ export default function App() {
       setMessages((prev) =>
         prev.map((m) => (m.id === assistantId ? { ...m, pending: false } : m))
       );
-      // refresh file tree indirectly by bumping workspace string reference? keep same
       setWorkspace((w) => w);
     }
   }
@@ -188,6 +212,9 @@ export default function App() {
     setError(null);
   }
 
+  const onlineProviders = status?.providers?.filter((p) => p.online) || [];
+  const offlineProviders = status?.providers?.filter((p) => !p.online) || [];
+
   return (
     <div className="app-shell">
       <aside className="panel left">
@@ -197,33 +224,85 @@ export default function App() {
             <div className="brand-name">IAOffDev</div>
           </div>
           <p className="brand-tag">
-            Agente de IA 100% local para criar, ler e evoluir código — sem nuvem.
+            Agente offline que consulta todas as IAs locais de desenvolvimento na sua máquina.
           </p>
           <div className="status-chip" title={status?.message}>
             <span className={`status-dot ${online ? "online" : ""}`} />
-            {online ? "Ollama online" : "Ollama offline"}
+            {online
+              ? `${onlineProviders.length} IA(s) online · ${status?.models?.length || 0} modelo(s)`
+              : "Nenhuma IA offline detectada"}
           </div>
         </div>
 
         <div className="sidebar-section">
+          <label className="sidebar-label" htmlFor="council">
+            Modo de consulta
+          </label>
+          <label className="toggle-row" htmlFor="council">
+            <input
+              id="council"
+              type="checkbox"
+              checked={council}
+              onChange={(e) => setCouncil(e.target.checked)}
+            />
+            <span>Consultar todas as IAs offline</span>
+          </label>
+          <p className="hint">
+            Liga Ollama, LM Studio, LocalAI, llama.cpp, Jan, GPT4All e sintetiza a melhor resposta.
+          </p>
+        </div>
+
+        <div className="sidebar-section">
           <label className="sidebar-label" htmlFor="model">
-            Modelo local
+            Modelo principal
           </label>
           <select
             id="model"
             className="select"
             value={model}
             onChange={(e) => setModel(e.target.value)}
+            disabled={council}
           >
-            {(status?.models?.length ? status.models : [{ name: status?.default_model || "qwen2.5-coder:7b" }]).map(
-              (m) => (
-                <option key={m.name} value={m.name}>
-                  {m.name}
+            {(status?.models?.length
+              ? status.models
+              : [{ name: status?.default_model || "qwen2.5-coder:7b", id: status?.default_model }]
+            ).map((m) => {
+              const value = m.id || m.name;
+              return (
+                <option key={value} value={value}>
+                  {modelLabel(m)}
                 </option>
-              )
-            )}
+              );
+            })}
           </select>
-          <p className="hint">{status?.message || "Conectando…"}</p>
+          <p className="hint">
+            {council
+              ? "No modo coletivo o modelo principal só sintetiza o resultado."
+              : status?.message || "Conectando…"}
+          </p>
+        </div>
+
+        <div className="sidebar-section">
+          <span className="sidebar-label">Provedores locais</span>
+          <div className="provider-list">
+            {(status?.providers || []).map((p) => (
+              <div key={p.id} className={`provider-row ${p.online ? "on" : "off"}`}>
+                <span className={`status-dot ${p.online ? "online" : ""}`} />
+                <div>
+                  <strong>{p.name}</strong>
+                  <small>
+                    {p.online ? `${p.models.length} modelo(s)` : p.error || "offline"}
+                  </small>
+                </div>
+              </div>
+            ))}
+            {!status?.providers?.length && (
+              <p className="hint">Detectando Ollama, LM Studio, LocalAI…</p>
+            )}
+          </div>
+          {offlineProviders.length > 0 && onlineProviders.length > 0 && (
+            <p className="hint">{offlineProviders.length} provedor(es) ainda offline.</p>
+          )}
         </div>
 
         <div className="sidebar-section">
@@ -244,20 +323,17 @@ export default function App() {
           />
           <p className="hint">O agente só acessa arquivos dentro desta pasta.</p>
         </div>
-
-        <div className="sidebar-section" style={{ borderBottom: "none", marginTop: "auto" }}>
-          <p className="hint">
-            Dica: instale um modelo coder com{" "}
-            <code style={{ fontFamily: "var(--mono)" }}>ollama pull qwen2.5-coder:7b</code>
-          </p>
-        </div>
       </aside>
 
       <main className="main">
         <header className="main-header">
           <div>
             <h1>Assistente de desenvolvimento</h1>
-            <p>Converse, explore o projeto e peça alterações de código — tudo offline.</p>
+            <p>
+              {council
+                ? "Modo coletivo: pergunta em paralelo a todas as IAs offline e consolida a resposta."
+                : "Modo único: usa o modelo selecionado com ferramentas de arquivos."}
+            </p>
           </div>
           <button type="button" className="ghost-btn" onClick={clearChat} disabled={streaming}>
             Nova conversa
@@ -267,10 +343,10 @@ export default function App() {
         <div className="chat-scroll" ref={scrollRef}>
           {messages.length === 0 && (
             <section className="welcome">
-              <h2>Desenvolva com um copiloto local.</h2>
+              <h2>Uma pergunta. Todas as IAs locais.</h2>
               <p>
-                O IAOffDev usa Ollama na sua máquina para ler, buscar e editar arquivos do
-                workspace com uma interface simples e focada.
+                O IAOffDev descobre motores offline na sua máquina, consulta os modelos de
+                desenvolvimento e entrega uma síntese prática — sem nuvem.
               </p>
               <div className="prompt-grid">
                 {SUGGESTIONS.map((item) => (
@@ -278,8 +354,11 @@ export default function App() {
                     key={item.title}
                     type="button"
                     className="prompt-btn"
-                    onClick={() => void sendPrompt(item.prompt)}
-                    disabled={!online || streaming}
+                    onClick={() => {
+                      if (item.title.includes("todas")) setCouncil(true);
+                      void sendPrompt(item.prompt);
+                    }}
+                    disabled={streaming || (!online && !item.title.includes("todas"))}
                   >
                     <strong>{item.title}</strong>
                     <span>{item.detail}</span>
@@ -305,9 +384,11 @@ export default function App() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               placeholder={
-                online
-                  ? "Peça para criar uma função, explicar um arquivo, corrigir um bug…"
-                  : "Inicie o Ollama para conversar com o agente"
+                online || council
+                  ? council
+                    ? "Pergunte e todas as IAs offline vão responder…"
+                    : "Peça para criar uma função, explicar um arquivo, corrigir um bug…"
+                  : "Inicie Ollama, LM Studio ou outra IA local"
               }
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
@@ -318,12 +399,12 @@ export default function App() {
               disabled={streaming}
             />
             <button type="submit" className="primary-btn" disabled={!canSend}>
-              {streaming ? "Pensando…" : "Enviar"}
+              {streaming ? "Consultando…" : council ? "Consultar todas" : "Enviar"}
             </button>
           </div>
           <div className="composer-meta">
             <span>Enter envia · Shift+Enter nova linha</span>
-            <span>{model || "sem modelo"}</span>
+            <span>{council ? "modo coletivo" : model || "sem modelo"}</span>
           </div>
         </form>
       </main>

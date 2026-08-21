@@ -10,16 +10,31 @@ export interface ChatMessage {
 
 export interface ModelInfo {
   name: string;
+  id?: string | null;
+  provider?: string | null;
+  provider_id?: string | null;
   size?: number | null;
   modified_at?: string | null;
+}
+
+export interface ProviderInfo {
+  id: string;
+  name: string;
+  kind: string;
+  base_url: string;
+  online: boolean;
+  models: ModelInfo[];
+  error?: string | null;
 }
 
 export interface StatusResponse {
   online: boolean;
   ollama_url: string;
   models: ModelInfo[];
+  providers: ProviderInfo[];
   default_model: string;
   message: string;
+  council_ready?: boolean;
 }
 
 export interface FileEntry {
@@ -30,13 +45,25 @@ export interface FileEntry {
 }
 
 export interface AgentEvent {
-  type: "token" | "tool_start" | "tool_result" | "assistant_partial" | "done" | "error";
+  type:
+    | "token"
+    | "tool_start"
+    | "tool_result"
+    | "assistant_partial"
+    | "council_start"
+    | "council_result"
+    | "done"
+    | "error";
   content?: string;
   name?: string;
   arguments?: Record<string, unknown>;
   model?: string;
   workspace?: string;
   tool_calls?: unknown[];
+  models?: string[];
+  ok?: boolean;
+  provider?: string;
+  providers?: string[];
 }
 
 const API_BASE = "";
@@ -80,6 +107,7 @@ export async function* streamChat(payload: {
   model?: string;
   workspace?: string;
   use_tools?: boolean;
+  council?: boolean;
 }): AsyncGenerator<AgentEvent> {
   const res = await fetch(`${API_BASE}/api/chat`, {
     method: "POST",
@@ -125,4 +153,17 @@ export function formatBytes(size?: number | null): string {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+export function modelLabel(m: ModelInfo): string {
+  const id = m.id || m.name;
+  const provider = m.provider || m.provider_id;
+  if (provider && !id.startsWith(`${provider}/`) && !id.includes("/")) {
+    return `${provider} · ${m.name}`;
+  }
+  if (id.includes("/")) {
+    const [prov, ...rest] = id.split("/");
+    return `${prov} · ${rest.join("/")}`;
+  }
+  return m.name;
 }

@@ -1,12 +1,38 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
 from .config import settings
 from .demo import demo_agent_run
-from .ollama_client import OllamaClient, OllamaError
+from .providers.clients import ProviderError
+from .providers.registry import (
+    discover_providers,
+    flatten_models,
+    pick_council_models,
+    resolve_model_ref,
+)
 from .tools import TOOL_DEFINITIONS, resolve_workspace, run_tool
+
+
+def ensure_demo_workspace():
+    """Cria um workspace de demonstração se o padrão não existir com conteúdo."""
+    root = settings.workspace_root
+    root.mkdir(parents=True, exist_ok=True)
+    demo = root / "demo-app"
+    if not demo.exists():
+        demo.mkdir(parents=True, exist_ok=True)
+        (demo / "README.md").write_text(
+            "# Demo App\n\nProjeto de exemplo para o IAOffDev.\n",
+            encoding="utf-8",
+        )
+        (demo / "main.py").write_text(
+            'def greet(name: str) -> str:\n    return f"Olá, {name}!"\n\n\nif __name__ == "__main__":\n    print(greet("mundo"))\n',
+            encoding="utf-8",
+        )
+    return root
+
 
 SYSTEM_PROMPT = """Você é o IAOffDev, um agente de IA offline especializado em desenvolvimento de software.
 
@@ -19,7 +45,17 @@ Princípios:
 - Quando gerar código, use blocos markdown com a linguagem correta.
 - Se algo estiver fora do alcance (sem modelo, sem arquivo), diga objetivamente o que falta.
 
-Você opera 100% local via Ollama — sem enviar dados para a nuvem.
+Você opera 100% local — consulta IAs offline na máquina (Ollama, LM Studio, LocalAI, etc.), sem nuvem.
+"""
+
+COUNCIL_SYNTH_PROMPT = """Você é o orquestrador do IAOffDev. Várias IAs offline responderam à mesma pergunta de desenvolvimento.
+
+Sua tarefa:
+1. Compare as respostas.
+2. Produza UMA resposta final prática em português, com o melhor código/abordagem.
+3. Se houver divergências importantes, cite-as brevemente.
+4. Não invente APIs que nenhuma resposta usou sem necessidade.
+5. Prefira soluções corretas, simples e testáveis.
 """
 
 
@@ -40,10 +76,11 @@ def _normalize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return normalized
 
 
-class DevAgent:
-    def __init__(self, client: OllamaClient | None = None) -> None:
-        self.client = client or OllamaClient()
+def _chunk_tokens(content: str, size: int = 48) -> list[str]:
+    return [content[i : i + size] for i in range(0, len(content), size)] or [""]
 
+
+class DevAgent:
     async def run(
         self,
         messages: list[dict[str, Any]],
@@ -51,22 +88,43 @@ class DevAgent:
         model: str | None = None,
         workspace: str | None = None,
         use_tools: bool = True,
+        council: bool = False,
     ) -> AsyncIterator[dict[str, Any]]:
-        model_name = model or settings.default_model
         root = resolve_workspace(workspace)
-        history = [{"role": "system", "content": SYSTEM_PROMPT + f"\nWorkspace atual: {root}"}]
-        history.extend(_normalize_messages(messages))
+        providers = await discover_providers()
+        models = flatten_models(providers)
+        online_providers = [p for p in providers if p.online]
 
-        if not await self.client.health():
+        if not online_providers:
             yield {
                 "type": "token",
-                "content": "_Ollama offline. Usando modo demonstração local (ferramentas de arquivos ativas)._\n\n",
+                "content": (
+                    "_Nenhuma IA offline detectada (Ollama, LM Studio, LocalAI…). "
+                    "Usando modo demonstração local._\n\n"
+                ),
             }
             async for event in demo_agent_run(messages, workspace=str(root)):
                 yield event
             return
 
-        tools = TOOL_DEFINITIONS if use_tools else None
+        if council:
+            async for event in self._run_council(messages, root=str(root), models=models):
+                yield event
+            return
+
+        model_ref = model or (
+            next((m.id for m in models if "coder" in m.name.lower()), None)
+            or (models[0].id if models else settings.default_model)
+        )
+        resolved = resolve_model_ref(model_ref, models)
+        if not resolved:
+            yield {"type": "error", "content": f"Modelo não encontrado: {model_ref}"}
+            return
+        provider, raw_model = resolved
+
+        history = [{"role": "system", "content": SYSTEM_PROMPT + f"\nWorkspace atual: {root}"}]
+        history.extend(_normalize_messages(messages))
+        tools = TOOL_DEFINITIONS if use_tools and provider.endpoint.kind == "ollama" else None
         rounds = 0
 
         while True:
@@ -79,26 +137,22 @@ class DevAgent:
                 return
 
             try:
-                # Chamada não-stream para detectar tool calls; tokens finais vão no yield.
-                response = await self.client.chat(
-                    model=model_name,
+                response = await provider.chat(
+                    model=raw_model,
                     messages=history,
                     tools=tools,
                     stream=False,
                 )
-            except (OllamaError, Exception) as exc:  # noqa: BLE001
-                # Sem Ollama: modo demonstração com ferramentas locais.
+            except (ProviderError, Exception) as exc:  # noqa: BLE001
                 if rounds == 1:
                     yield {
                         "type": "token",
-                        "content": (
-                            f"_Ollama indisponível ({exc}). Entrando em modo demonstração local…_\n\n"
-                        ),
+                        "content": f"_Falha em {provider.endpoint.name}: {exc}. Tentando demonstração…_\n\n",
                     }
                     async for event in demo_agent_run(messages, workspace=str(root)):
                         yield event
                     return
-                yield {"type": "error", "content": f"Falha no Ollama: {exc}"}
+                yield {"type": "error", "content": f"Falha no provedor: {exc}"}
                 return
 
             message = response.get("message") or {}
@@ -117,6 +171,8 @@ class DevAgent:
                     name = function.get("name") or "unknown"
                     raw_args = function.get("arguments") or {}
                     if isinstance(raw_args, str):
+                        import json
+
                         try:
                             args = json.loads(raw_args) if raw_args.strip() else {}
                         except json.JSONDecodeError:
@@ -127,58 +183,164 @@ class DevAgent:
                     yield {"type": "tool_start", "name": name, "arguments": args}
                     result = run_tool(name, args, root)
                     yield {"type": "tool_result", "name": name, "content": result[:8000]}
-
-                    history.append(
-                        {
-                            "role": "tool",
-                            "name": name,
-                            "content": result[:12000],
-                        }
-                    )
+                    history.append({"role": "tool", "name": name, "content": result[:12000]})
                 continue
 
-            # Resposta final — reenvia em stream para UX fluida
-            if content:
-                # Já temos o conteúdo completo; emite em chunks simulados
-                # para manter o protocolo SSE uniforme no frontend.
-                chunk_size = 48
-                for i in range(0, len(content), chunk_size):
-                    yield {"type": "token", "content": content[i : i + chunk_size]}
-            else:
-                # Tenta stream real se a resposta veio vazia (raro)
-                async for event in self._stream_plain(model_name, history):
-                    yield event
-
-            yield {"type": "done", "model": model_name, "workspace": str(root)}
-            return
-
-    async def _stream_plain(
-        self, model: str, messages: list[dict[str, Any]]
-    ) -> AsyncIterator[dict[str, Any]]:
-        try:
-            async for chunk in self.client.chat_stream(model=model, messages=messages, tools=None):
-                part = (chunk.get("message") or {}).get("content") or ""
+            for part in _chunk_tokens(content):
                 if part:
                     yield {"type": "token", "content": part}
-                if chunk.get("done"):
-                    break
-        except Exception as exc:  # noqa: BLE001
-            yield {"type": "error", "content": str(exc)}
+            yield {
+                "type": "done",
+                "model": model_ref,
+                "workspace": str(root),
+                "providers": [p.id for p in online_providers],
+            }
+            return
 
+    async def _run_council(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        root: str,
+        models: list[Any],
+    ) -> AsyncIterator[dict[str, Any]]:
+        selected = pick_council_models(models)
+        if not selected:
+            yield {"type": "error", "content": "Nenhum modelo disponível para consulta coletiva."}
+            return
 
-def ensure_demo_workspace() -> Path:
-    """Cria um workspace de demonstração se o padrão não existir com conteúdo."""
-    root = settings.workspace_root
-    root.mkdir(parents=True, exist_ok=True)
-    demo = root / "demo-app"
-    if not demo.exists():
-        demo.mkdir(parents=True, exist_ok=True)
-        (demo / "README.md").write_text(
-            "# Demo App\n\nProjeto de exemplo para o IAOffDev.\n",
-            encoding="utf-8",
+        last_user = next(
+            (m.get("content") for m in reversed(messages) if m.get("role") == "user"),
+            "",
         )
-        (demo / "main.py").write_text(
-            'def greet(name: str) -> str:\n    return f"Olá, {name}!"\n\n\nif __name__ == "__main__":\n    print(greet("mundo"))\n',
-            encoding="utf-8",
-        )
-    return root
+        yield {
+            "type": "council_start",
+            "content": f"Consultando {len(selected)} IA(s) offline em paralelo…",
+            "models": [m.id for m in selected],
+        }
+
+        ask_messages = [
+            {
+                "role": "system",
+                "content": (
+                    SYSTEM_PROMPT
+                    + f"\nWorkspace atual: {root}\n"
+                    "Responda de forma direta à pergunta do usuário. "
+                    "Se precisar de arquivos, descreva o que faria (nesta rodada não há tools)."
+                ),
+            },
+            {"role": "user", "content": last_user or ""},
+        ]
+
+        async def query_one(remote_model: Any) -> dict[str, Any]:
+            provider, raw = resolve_model_ref(remote_model.id, models) or (None, None)
+            if not provider or not raw:
+                return {
+                    "model": remote_model.id,
+                    "provider": remote_model.provider_name,
+                    "ok": False,
+                    "content": "Provedor indisponível",
+                }
+            try:
+                response = await asyncio.wait_for(
+                    provider.chat(model=raw, messages=ask_messages, tools=None, stream=False),
+                    timeout=settings.council_timeout_seconds,
+                )
+                content = ((response.get("message") or {}).get("content") or "").strip()
+                return {
+                    "model": remote_model.id,
+                    "provider": remote_model.provider_name,
+                    "ok": bool(content),
+                    "content": content or "(resposta vazia)",
+                }
+            except Exception as exc:  # noqa: BLE001
+                return {
+                    "model": remote_model.id,
+                    "provider": remote_model.provider_name,
+                    "ok": False,
+                    "content": f"Erro: {exc}",
+                }
+
+        tasks = [asyncio.create_task(query_one(m)) for m in selected]
+        answers: list[dict[str, Any]] = []
+        for task in asyncio.as_completed(tasks):
+            result = await task
+            answers.append(result)
+            yield {
+                "type": "council_result",
+                "name": result["model"],
+                "content": result["content"][:6000],
+                "ok": result["ok"],
+                "provider": result.get("provider"),
+            }
+
+        ok_answers = [a for a in answers if a.get("ok")]
+        if not ok_answers:
+            yield {
+                "type": "error",
+                "content": "Nenhuma IA offline retornou resposta útil. Verifique Ollama/LM Studio/LocalAI.",
+            }
+            return
+
+        # Síntese com o primeiro modelo coder disponível
+        synth_model = pick_council_models(models, max_models=1)[0]
+        resolved = resolve_model_ref(synth_model.id, models)
+        digest_parts = []
+        for answer in ok_answers:
+            digest_parts.append(
+                f"### {answer['provider']} · `{answer['model']}`\n{answer['content'][:3500]}\n"
+            )
+        synth_messages = [
+            {"role": "system", "content": COUNCIL_SYNTH_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    f"Pergunta original:\n{last_user}\n\n"
+                    f"Respostas das IAs:\n\n" + "\n---\n".join(digest_parts)
+                ),
+            },
+        ]
+
+        yield {
+            "type": "token",
+            "content": "\n\n---\n\n**Síntese do IAOffDev** (combinando todas as IAs):\n\n",
+        }
+
+        if resolved:
+            provider, raw = resolved
+            try:
+                response = await provider.chat(
+                    model=raw,
+                    messages=synth_messages,
+                    tools=None,
+                    stream=False,
+                )
+                content = ((response.get("message") or {}).get("content") or "").strip()
+                for part in _chunk_tokens(content):
+                    if part:
+                        yield {"type": "token", "content": part}
+            except Exception as exc:  # noqa: BLE001
+                # Fallback: junta as melhores respostas
+                yield {
+                    "type": "token",
+                    "content": (
+                        f"_Síntese automática falhou ({exc}). Segue consolidado manual:_\n\n"
+                        + "\n\n".join(
+                            f"**{a['model']}**\n{a['content'][:2000]}" for a in ok_answers[:3]
+                        )
+                    ),
+                }
+        else:
+            yield {
+                "type": "token",
+                "content": "\n\n".join(
+                    f"**{a['model']}**\n{a['content'][:2000]}" for a in ok_answers[:3]
+                ),
+            }
+
+        yield {
+            "type": "done",
+            "model": "council",
+            "workspace": root,
+            "models": [a["model"] for a in ok_answers],
+        }

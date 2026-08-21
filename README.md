@@ -39,14 +39,36 @@ ollama pull qwen2.5-coder:7b
 
 Requisitos do instalador: **Python 3.11+** e **Node.js 20+** (só na hora de instalar/gerar o app).
 
+## IAs offline suportadas
+
+O agente descobre automaticamente motores locais e, no modo **Consultar todas as IAs offline**, pergunta em paralelo e sintetiza a resposta:
+
+| Provedor | Endpoint padrão |
+|----------|-----------------|
+| Ollama | `http://127.0.0.1:11434` |
+| LM Studio | `http://127.0.0.1:1234/v1` |
+| LocalAI | `http://127.0.0.1:8080/v1` |
+| llama.cpp | `http://127.0.0.1:8081/v1` |
+| Jan | `http://127.0.0.1:1337/v1` |
+| GPT4All | `http://127.0.0.1:4891/v1` |
+| Oobabooga | `http://127.0.0.1:5000/v1` |
+| TabbyAPI | `http://127.0.0.1:5001/v1` |
+
+Provedores extras via env:
+
+```bash
+export IAOFFDEV_EXTRA_PROVIDERS='[{"id":"meu","name":"Meu LLM","kind":"openai_compat","base_url":"http://127.0.0.1:9999/v1"}]'
+```
+
 ## O que faz
 
 - Chat em português focado em desenvolvimento
+- **Consulta coletiva** a todas as IAs offline detectadas
 - Ferramentas do agente: listar pastas, ler/escrever arquivos, buscar no código
 - Painel de arquivos do workspace
 - Streaming de respostas
 - Janela nativa no macOS (WebView)
-- Modo demonstração local quando o Ollama estiver offline
+- Modo demonstração local quando nenhuma IA estiver online
 
 ## Desenvolvimento (web + API separados)
 

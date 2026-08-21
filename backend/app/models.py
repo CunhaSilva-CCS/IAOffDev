@@ -21,22 +21,38 @@ class ChatRequest(BaseModel):
     workspace: str | None = None
     stream: bool = True
     use_tools: bool = True
+    council: bool = False  # consultar todas as IAs offline
 
 
 class ModelInfo(BaseModel):
     name: str
+    id: str | None = None
+    provider: str | None = None
+    provider_id: str | None = None
     size: int | None = None
     modified_at: str | None = None
     digest: str | None = None
     details: dict[str, Any] = Field(default_factory=dict)
 
 
+class ProviderInfo(BaseModel):
+    id: str
+    name: str
+    kind: str
+    base_url: str
+    online: bool
+    models: list[ModelInfo] = Field(default_factory=list)
+    error: str | None = None
+
+
 class StatusResponse(BaseModel):
     online: bool
     ollama_url: str
     models: list[ModelInfo] = Field(default_factory=list)
+    providers: list[ProviderInfo] = Field(default_factory=list)
     default_model: str
     message: str
+    council_ready: bool = False
 
 
 class FileEntry(BaseModel):
