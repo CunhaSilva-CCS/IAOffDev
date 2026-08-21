@@ -2,6 +2,9 @@
 
 Agente de IA **offline** para desenvolvimento de software — no Mac, instala e abre como um programa normal.
 
+> **Manual completo:** [docs/MANUAL_DO_USUARIO.md](docs/MANUAL_DO_USUARIO.md)  
+> Inclui instalação, interface e **como conectar o agente aos modelos** (Ollama, LM Studio, LocalAI, etc.).
+
 ## App para Mac (recomendado)
 
 No Mac, na pasta do projeto:
