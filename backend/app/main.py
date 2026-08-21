@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .agent import DevAgent, ensure_demo_workspace
@@ -20,6 +20,7 @@ from .models import (
     WriteFileRequest,
 )
 from .ollama_client import OllamaClient
+from .paths import resolve_static_dir
 from .tools import list_directory, read_file, resolve_workspace, search_files, write_file
 
 app = FastAPI(
@@ -38,6 +39,7 @@ app.add_middleware(
 
 agent = DevAgent()
 ollama = OllamaClient()
+STATIC_DIR = resolve_static_dir()
 
 
 @app.on_event("startup")
@@ -175,6 +177,37 @@ async def ask(body: QuickPrompt) -> StreamingResponse:
             yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+def _mount_frontend() -> None:
+    """Serve a UI build when running as app (sem Vite separado)."""
+    if STATIC_DIR is None or not STATIC_DIR.exists():
+        return
+    assets = STATIC_DIR / "assets"
+    if assets.is_dir():
+        app.mount("/assets", StaticFiles(directory=assets), name="assets")
+
+    index_file = STATIC_DIR / "index.html"
+
+    @app.get("/")
+    async def spa_index() -> FileResponse:
+        return FileResponse(index_file)
+
+    @app.get("/{full_path:path}")
+    async def spa_fallback(full_path: str) -> FileResponse:
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not found")
+        candidate = (STATIC_DIR / full_path).resolve()
+        try:
+            candidate.relative_to(STATIC_DIR.resolve())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid path") from exc
+        if candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(index_file)
+
+
+_mount_frontend()
 
 
 def create_app() -> FastAPI:

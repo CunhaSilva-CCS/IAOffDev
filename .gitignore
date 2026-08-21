@@ -9,5 +9,8 @@ node_modules/
 frontend/dist/
 *.tsbuildinfo
 workspace_data/
+dist/
+*.dmg
+*.app/
 *.log
 .DS_Store

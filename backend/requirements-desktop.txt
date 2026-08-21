@@ -1,0 +1,2 @@
+# Dependências extras para o app desktop (janela nativa)
+pywebview>=5.3.2
