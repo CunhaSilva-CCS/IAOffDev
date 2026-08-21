@@ -13,6 +13,11 @@ class Settings(BaseSettings):
     max_tool_rounds: int = 8
     host: str = "127.0.0.1"
     port: int = 8765
+    # Consulta paralela em todas as IAs offline
+    council_max_models: int = 6
+    council_timeout_seconds: float = 90.0
+    # JSON opcional: [{"id":"meu","name":"Meu LLM","kind":"openai_compat","base_url":"http://127.0.0.1:9999/v1"}]
+    extra_providers_json: str = "[]"
 
 
 settings = Settings()
